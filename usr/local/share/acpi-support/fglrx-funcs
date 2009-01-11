@@ -1,3 +1,6 @@
+# These functions are used by my docking/undocking hooks for
+# reconfiguring the screen.
+
 # Return a list of the externally-connected monitors suitable for
 # aticonfig --enable-monitor=<list>
 fglrx-external-monitors()
@@ -5,7 +8,7 @@ fglrx-external-monitors()
     aticonfig --query-monitor | grep "Connected" | sed -r -e 's/[^:]*://' -e 's/lvds,?//' -e 's/ //g'
 }
 
-# Return a list of the connected monitors
+# Return a list of the enabled monitors
 fglrx-enabled-monitors()
 {
     aticonfig --query-monitor | grep "Enabled" | sed -r -e 's/[^:]*://' -e 's/ //g'
@@ -14,7 +17,9 @@ fglrx-enabled-monitors()
 # Enable the monitors passed as an argument
 fglrx-enable-monitor()
 {
+    # If the ones being enabled are the same as those already enabled
     if [ x"$1" = x"$(fglrx-enabled-monitors)" ] ; then
+        # Simply set the desktop size accordingly
         if (echo $1 | grep -q ','); then
            xrandr -s 0
         else

@@ -1,0 +1,60 @@
+# Return a list of the externally-connected monitors suitable for
+# aticonfig --enable-monitor=<list>
+fglrx-external-monitors()
+{
+    aticonfig --query-monitor | grep "Connected" | sed -r -e 's/[^:]*://' -e 's/lvds,?//' -e 's/ //g'
+}
+
+# Return a list of the connected monitors
+fglrx-enabled-monitors()
+{
+    aticonfig --query-monitor | grep "Enabled" | sed -r -e 's/[^:]*://' -e 's/ //g'
+}
+
+# Enable the monitors passed as an argument
+fglrx-enable-monitor()
+{
+    if [ x"$1" = x"$(fglrx-enabled-monitors)" ] ; then
+        if (echo $1 | grep -q ','); then
+           xrandr -s 0
+        else
+           xrandr -s 1
+        fi
+        return 0
+    fi
+
+    # FGLRX 8-4 crashes when enabling different monitors in big
+    # desktop mode, so make sure we're not there
+    # xrandr -s 1
+    # this bug is fixed in FGLRX 8-5
+
+    # Save and restore /etc/X11/xorg.conf so it doesn't get modified here.
+    # local savexorg=`mktemp -t xorg.conf.XXXXXXX`
+    # cp /etc/X11/xorg.conf "$savexorg"
+    aticonfig --enable-monitor=$1 --effective=now
+    # cat "$savexorg" > /etc/X11/xorg.conf
+    # rm "$savexorg"
+
+    if (echo $1 | grep -q ','); then
+       xrandr -s 0
+
+        # This works around an fglrx 8.476 bug that causes the screen
+        # to go into a magnified/scrolling mode if I switch to a
+        # virtual terminal and then back to the screen
+        # xrandr -s 1
+        # xrandr -s 0
+    else
+        # I never care that much about graphics performance; save my
+        # battery and silence my fan
+        aticonfig --set-powerstate=1
+
+        # This works around an fglrx 8.476 bug that causes the screen
+        # to go into a magnified/scrolling mode
+        # local console=`fgconsole`
+        # chvt 12
+        # chvt $console
+        # xrandr -s 0
+        # xrandr -s 1
+    fi
+}
+

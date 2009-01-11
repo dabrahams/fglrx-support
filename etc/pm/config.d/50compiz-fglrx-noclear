@@ -1,0 +1,5 @@
+# This file is /etc/pm/config.d/50compiz-fglrx-noclear
+
+# Disable the builtin 00clear because we need to kill off all compiz
+# instances before it does a chvt
+HOOK_BLACKLIST=00clear

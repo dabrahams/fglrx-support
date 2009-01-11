@@ -1,0 +1,203 @@
+#!/usr/bin/python
+
+# This file is /etc/pm/sleep.d/00compiz-fglrx
+
+import os
+import sys
+import time
+import cPickle as pickle
+import tempfile
+import re
+from math import ceil
+from subprocess import Popen, PIPE, check_call, CalledProcessError
+
+# get the stdout from executing the command made up of elements of cmd_args
+def backquote(cmd_args):
+    if type(cmd_args) is str:
+        cmd_args = cmd_args.split()
+    process = Popen(cmd_args, stdout=PIPE)
+    out = process.communicate()[0].rstrip()
+    if process.returncode != 0:
+        raise CalledProcessError(process.returncode, cmd_args)
+    return out
+
+def psinfo(pid, field):
+    return backquote(('ps --no-headers -ww -o %s %s' % (field, pid)).split())
+
+def proc(pid, part):
+    return open('/proc/%s/%s' % (pid,part)).read().rstrip('\0').split('\0')
+
+def psenviron(pid):
+    return dict(
+        x.split('=',1)
+        for x in proc(pid,'environ')
+        if '=' in x)
+
+# Change the following to something like
+#
+#   LOG_FILE_NAME='/home/dave/suspend.log'
+#
+# in order to see some debug output
+LOG_FILE_NAME=None
+
+logfile=None
+def log(*args):
+    if not LOG_FILE_NAME: 
+        return
+    global logfile
+    if not logfile:
+        logfile = open(LOG_FILE_NAME,'a')
+    logfile.write(' '.join([str(a) for a in args]) + '\n')
+    logfile.flush()
+
+class TimeOutError(Exception): pass
+
+def try_kill(pid, signal, timeout = 1.0, step = .01):
+    os.kill(pid, signal)
+    for x in range(int(ceil(timeout/step))):
+        if not os.path.exists('/proc/%d' % pid):
+            return
+        time.sleep(step)
+    raise TimeOutError, 'failed to kill process: %d in %d second(s)' % (pid,timeout)
+
+number = re.compile(r'\d*$')
+stat_fields = re.compile(
+    r'\s+'.join([
+            r'(?P<pid>\d+)', 
+            r'\((?P<comm>.+)\)',
+            r'(?P<state>[RSDZTW])',
+            r'(?P<ppid>\d+)'
+            ]))
+
+class NotCompiz(Exception): pass
+
+def compiz_real_info(pid):
+    stat = stat_fields.match(open('/proc/%d/stat' % pid).read())
+    if stat.group('comm') != 'compiz.real':
+        raise NotCompiz, 'continue' # we'll just move on to the next process
+    ppid = int(stat.group('ppid'))
+    return ppid, (psenviron(ppid), proc(ppid, 'cmdline'), psinfo(ppid,'user'))
+
+# Given recorded information about the parent processes of killed
+# compiz.real processes, "un-kill" them
+def restart_compiz(compiz_info):
+    if compiz_info:
+        log('restarting compiz')
+    for pid, (env,cmd,user) in compiz_info.items():
+
+        log('user:', user, 'command:', cmd)
+
+        # Ensure we have the necessary environment to re-launch the parent process
+        if 'DISPLAY' in env and 'XAUTHORITY' in env and os.path.isfile(env['XAUTHORITY']):
+
+            # If the parent didn't die when compiz.real was killed, kill the parent now
+            try: try_kill(pid,15)
+            except: pass 
+            
+            try:
+                check_call(['sudo', '-E', '-b', '-u', user] + cmd, env=env)
+
+            except Exception, e:
+                log('failed to relaunch')
+                log(traceback.format_exc())
+                print >>sys.stderr, traceback.format_exc()
+        else:
+            log('required environment missing', env)
+
+def suspend():
+    # locate all parent processes of compiz.real commands
+    all_pids = [int(f) for f in os.listdir('/proc') if number.match(f)]
+    compiz_info = {}
+
+    try:
+        # Gather up all the info about the processes that launch compiz.real
+        for pid in all_pids:        
+            try: ppid, info = compiz_real_info(pid)
+            except: continue            # Skip if not compiz.real or if already dead
+            try_kill(pid, 15)           # Kill off the compiz.real process
+            compiz_info[ppid] = info    # Remember how to restart its parent
+
+        # write out everything we need to restart the compiz
+        # processes and restore the current virtual terminal
+        fd, pickle_file_name = tempfile.mkstemp('.pck', 'compiz-fglrx', '/var/run')
+        pickle.dump((backquote('fgconsole'), compiz_info), open(pickle_file_name, 'w'),2)
+        log('pickle saved in', pickle_file_name)
+
+        # Keep a record of the name of the pickle file using
+        # facilities from pm-utils.  Using repr below ensures that
+        # the filename is quoted in a way that should be
+        # appropriate for the shell
+        check_call([
+            'sh', '-c', 
+            '. ${PM_FUNCTIONS} && savestate compiz-fglrx ' 
+            + repr(pickle_file_name)])
+    except:
+        log('failure to suspend!')
+        restart_compiz(compiz_info)
+        raise
+    
+    # Now switch the virtual terminal as would have been done by the
+    # 00clear hook.  If done with compiz running, this kills resume
+    log('switching to vt 63')
+    check_call(['chvt', '63'])
+
+def resume():
+    # Get all the information we need to re-start
+    pickle_file_name = backquote([
+            'sh', '-c', 
+            '. ${PM_FUNCTIONS} && restorestate compiz-fglrx'])
+
+    saved_console,compiz_info = pickle.load(open(pickle_file_name))
+    restart_compiz(compiz_info)
+
+    # This is the functionality from the 00clear hook
+    log('switching back to vt', saved_console)
+    check_call(['chvt', str(saved_console)])
+    check_call(['deallocvt', '63'])
+
+    # Try to make sure the screen wakes up and actually shows us the
+    # password dialog.  Without this we might need to move the mouse
+    # to see it.  Doesn't work, though; probably I need more
+    # environment setup in order to be able to do this.
+    # check_call(['xset','dpms','force','on'])
+
+    # if we can't get rid of this file for any reason, it's not a
+    # serious problem, so do it last.
+    os.unlink(pickle_file_name)
+
+
+# The check for an argument in the next line is a convenience for
+# development, so we can import this file and not have it try to do
+# anything.
+if __name__ == '__main__' and len(sys.argv) > 1: 
+
+    log('=====================', backquote('date'), '==================')
+    log('in ', ' '.join(sys.argv))
+
+    try:
+        if sys.argv[1] in ('suspend','hibernate'):
+            suspend()
+            
+        elif sys.argv[1] in ('resume','thaw'):
+            resume()
+
+        elif sys.argv[1] == 'help':
+            # Nothing to say
+            pass
+
+        else:
+            raise AssertionError, 'unknown argument %s' % sys.argv[1]
+
+    except Exception, e:
+        import traceback
+        log(sys.argv[0]+':', traceback.format_exc())
+
+        # if anything failed, try to inhibit suspension.
+        if sys.argv[1] in ('suspend','hibernate'):
+            inhibit_file = os.environ.get('INHIBIT')
+            if inhibit_file:
+                log('inhibiting with', inhibit_file)
+                open(inhibit_file,'a')
+        raise
+    
+        
